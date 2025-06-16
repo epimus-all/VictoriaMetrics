@@ -629,7 +629,7 @@ func (pt *partition) inmemoryPartsMerger() {
 		maxOutBytes := pt.getMaxBigPartSize()
 
 		pt.partsLock.Lock()
-		pws := getPartsToMerge(pt.inmemoryParts, maxOutBytes)
+		pws := pt.getPartsToMerge(pt.inmemoryParts, maxOutBytes)
 		pt.partsLock.Unlock()
 
 		if len(pws) == 0 {
@@ -662,7 +662,7 @@ func (pt *partition) smallPartsMerger() {
 		maxOutBytes := pt.getMaxBigPartSize()
 
 		pt.partsLock.Lock()
-		pws := getPartsToMerge(pt.smallParts, maxOutBytes)
+		pws := pt.getPartsToMerge(pt.smallParts, maxOutBytes)
 		pt.partsLock.Unlock()
 
 		if len(pws) == 0 {
@@ -695,7 +695,7 @@ func (pt *partition) bigPartsMerger() {
 		maxOutBytes := pt.getMaxBigPartSize()
 
 		pt.partsLock.Lock()
-		pws := getPartsToMerge(pt.bigParts, maxOutBytes)
+		pws := pt.getPartsToMerge(pt.bigParts, maxOutBytes)
 		pt.partsLock.Unlock()
 
 		if len(pws) == 0 {
@@ -1570,7 +1570,7 @@ func (pt *partition) mergePartsInternal(dstPartPath string, bsw *blockStreamWrit
 	retentionDeadline := currentTimestamp - pt.s.retentionMsecs
 	activeMerges.Add(1)
 	dmis := pt.s.getDeletedMetricIDs()
-	err := mergeBlockStreams(&ph, bsw, bsrs, stopCh, dmis, retentionDeadline, rowsMerged, rowsDeleted, useSparseCache)
+	err := mergeBlockStreams(pt.s, &ph, bsw, bsrs, stopCh, dmis, retentionDeadline, rowsMerged, rowsDeleted, useSparseCache)
 	activeMerges.Add(-1)
 	mergesCount.Add(1)
 	if err != nil {
@@ -1753,7 +1753,7 @@ func (pt *partition) removeStaleParts() {
 // getPartsToMerge returns optimal parts to merge from pws.
 //
 // The summary size of the returned parts must be smaller than maxOutBytes.
-func getPartsToMerge(pws []*partWrapper, maxOutBytes uint64) []*partWrapper {
+func (pt *partition) getPartsToMerge(pws []*partWrapper, maxOutBytes uint64) []*partWrapper {
 	pwsRemaining := make([]*partWrapper, 0, len(pws))
 	for _, pw := range pws {
 		if !pw.isInMerge {
@@ -1763,6 +1763,19 @@ func getPartsToMerge(pws []*partWrapper, maxOutBytes uint64) []*partWrapper {
 
 	pwsToMerge := appendPartsToMerge(nil, pwsRemaining, defaultPartsToMerge, maxOutBytes)
 
+	if len(pwsToMerge) == 0 {
+		for _, pw := range pws {
+			if isAvailable(pw) {
+				if pw.p.size > maxOutBytes || pw.isInMerge {
+					continue
+				}
+				//downsampling or retention filter one by one
+				pwsToMerge = append(pwsToMerge, pw)
+				break
+			}
+		}
+	}
+
 	for _, pw := range pwsToMerge {
 		if pw.isInMerge {
 			logger.Panicf("BUG: partWrapper.isInMerge cannot be set")
@@ -1771,6 +1784,24 @@ func getPartsToMerge(pws []*partWrapper, maxOutBytes uint64) []*partWrapper {
 	}
 
 	return pwsToMerge
+
+}
+
+func isAvailable(pw *partWrapper) bool {
+	if pw.mp != nil {
+		return false
+	}
+	rdurations := GetRetentionFilter()
+	ddurations := GetDownSamplingPeriod()
+	duration := append(rdurations, ddurations...)
+	for _, duration := range duration {
+		at := pw.p.indexFile.(*fs.ReaderAt)
+		neverDoIt := at.GetModTime().UnixMilli()-pw.p.ph.MaxTimestamp < duration.Period.Milliseconds()
+		timeOut := time.Now().UnixMilli()-pw.p.ph.MaxTimestamp > duration.Period.Milliseconds()
+		result := neverDoIt && timeOut
+		return result
+	}
+	return false
 }
 
 // getPartsForOptimalMerge returns parts from pws for optimal merge, plus the remaining parts.

@@ -511,7 +511,7 @@ func TestNextRetentionDeadlineSeconds(t *testing.T) {
 	f("2023-12-19T03:59:59Z", 365*24*time.Hour, 0, "2023-12-19T04:00:00Z")
 
 	// At 2023-12-19T04:00:00Z the rotation occurs. New deadline is
-	// 2024-12-18T04:00:00Z. Restarts during that period do not change the
+	// 2024-12-18T04:00:00Z. Restarts during that Period do not change the
 	// new deadline:
 	f("2023-12-19T04:00:01Z", 365*24*time.Hour, 0, "2024-12-18T04:00:00Z")
 	f("2024-01-01T00:00:00Z", 365*24*time.Hour, 0, "2024-12-18T04:00:00Z")
@@ -954,7 +954,7 @@ func TestStorageDeleteSeries_CachesAreUpdatedOrReset(t *testing.T) {
 		tfssKey []byte
 	)
 	tfs := NewTagFilters()
-	if err := tfs.Add(nil, []byte("metric.*"), false, true); err != nil {
+	if err := tfs.Add([]byte("key"), []byte("v.*"), false, true); err != nil {
 		t.Fatalf("unexpected error in TagFilters.Add: %v", err)
 	}
 	tfss := []*TagFilters{tfs}
@@ -3957,7 +3957,7 @@ func TestStorageMetricTracker(t *testing.T) {
 	// search query for all ingested metrics
 	tfs := NewTagFilters()
 	if err := tfs.Add(nil, []byte("metric_.+"), false, true); err != nil {
-		t.Fatalf("unexpected error at tfs add: %s", err)
+		t.Fatalf("unexpected error at Tfs add: %s", err)
 	}
 
 	sr.Init(nil, s, []*TagFilters{tfs}, tr, 1e5, noDeadline)

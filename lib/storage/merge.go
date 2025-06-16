@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/decimal"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fasttime"
@@ -16,13 +17,13 @@ import (
 // mergeBlockStreams returns immediately if stopCh is closed.
 //
 // rowsMerged is atomically updated with the number of merged rows during the merge.
-func mergeBlockStreams(ph *partHeader, bsw *blockStreamWriter, bsrs []*blockStreamReader, stopCh <-chan struct{}, dmis *uint64set.Set, retentionDeadline int64,
+func mergeBlockStreams(s *Storage, ph *partHeader, bsw *blockStreamWriter, bsrs []*blockStreamReader, stopCh <-chan struct{}, dmis *uint64set.Set, retentionDeadline int64,
 	rowsMerged, rowsDeleted *atomic.Uint64, useSparseCache bool) error {
 	ph.Reset()
 
 	bsm := bsmPool.Get().(*blockStreamMerger)
 	bsm.Init(bsrs, retentionDeadline, useSparseCache)
-	err := mergeBlockStreamsInternal(ph, bsw, bsm, stopCh, dmis, rowsMerged, rowsDeleted)
+	err := mergeBlockStreamsInternal(s, ph, bsw, bsm, stopCh, dmis, rowsMerged, rowsDeleted)
 	bsm.reset()
 	bsmPool.Put(bsm)
 	bsw.MustClose()
@@ -40,7 +41,7 @@ var bsmPool = &sync.Pool{
 
 var errForciblyStopped = fmt.Errorf("forcibly stopped")
 
-func mergeBlockStreamsInternal(ph *partHeader, bsw *blockStreamWriter, bsm *blockStreamMerger, stopCh <-chan struct{}, dmis *uint64set.Set, rowsMerged, rowsDeleted *atomic.Uint64) error {
+func mergeBlockStreamsInternal(s *Storage, ph *partHeader, bsw *blockStreamWriter, bsm *blockStreamMerger, stopCh <-chan struct{}, dmis *uint64set.Set, rowsMerged, rowsDeleted *atomic.Uint64) error {
 	pendingBlockIsEmpty := true
 	pendingBlock := getBlock()
 	defer putBlock(pendingBlock)
@@ -80,6 +81,10 @@ func mergeBlockStreamsInternal(ph *partHeader, bsw *blockStreamWriter, bsm *bloc
 		b := bsm.Block
 		if dmis.Has(b.bh.TSID.MetricID) {
 			// Skip blocks for deleted metrics.
+			localRowsDeleted += uint64(b.bh.RowsCount)
+			continue
+		}
+		if isRetentionFilterAvailable(s, b) {
 			localRowsDeleted += uint64(b.bh.RowsCount)
 			continue
 		}
@@ -125,6 +130,10 @@ func mergeBlockStreamsInternal(ph *partHeader, bsw *blockStreamWriter, bsm *bloc
 		tmpBlock.bh.Scale = b.bh.Scale
 		tmpBlock.bh.PrecisionBits = min(pendingBlock.bh.PrecisionBits, b.bh.PrecisionBits)
 		mergeBlocks(tmpBlock, pendingBlock, b, retentionDeadline, &localRowsDeleted)
+		available, duration := isDownSamplingAvailable(s, b)
+		if available {
+			downSampling(tmpBlock, duration)
+		}
 		if len(tmpBlock.timestamps) <= maxRowsPerBlock {
 			// More entries may be added to tmpBlock. Swap it with pendingBlock,
 			// so more entries may be added to pendingBlock on the next iteration.
@@ -201,6 +210,65 @@ func mergeBlocks(ob, ib1, ib2 *Block, retentionDeadline int64, rowsDeleted *uint
 		}
 		ib1, ib2 = ib2, ib1
 	}
+}
+
+func isDownSamplingAvailable(s *Storage, b *Block) (bool, time.Duration) {
+	durations := GetDownSamplingPeriod()
+	for _, duration := range durations {
+		filters := duration.Tfs
+		if filters != nil {
+			tr := TimeRange{
+				MinTimestamp: b.bh.MinTimestamp,
+				MaxTimestamp: b.bh.MaxTimestamp,
+			}
+			if !s.ContainsMetricId(filters, tr, b.bh.TSID.MetricID) {
+				return false, 0
+			}
+		}
+		period := duration.Period
+		interval := duration.Interval
+		isTimeout := time.Now().UnixMilli()-b.bh.MaxTimestamp > period.Milliseconds()
+		return isTimeout, interval
+	}
+	return false, 0
+}
+
+func isRetentionFilterAvailable(s *Storage, b *Block) bool {
+	durations := GetRetentionFilter()
+	for _, duration := range durations {
+		filters := duration.Tfs
+		tr := TimeRange{
+			MinTimestamp: b.bh.MinTimestamp,
+			MaxTimestamp: b.bh.MaxTimestamp,
+		}
+		if !s.ContainsMetricId(filters, tr, b.bh.TSID.MetricID) {
+			return false
+		}
+		period := duration.Period
+		return (time.Now().UnixMilli() - b.bh.MaxTimestamp) > period.Milliseconds()
+	}
+	return false
+}
+
+func downSampling(block *Block, downSamplingRate time.Duration) {
+	var ts []int64
+	var va []int64
+	timestamps := block.timestamps
+	values := block.values
+	var time_ = timestamps[0]
+	ts = append(ts, timestamps[0])
+	va = append(va, values[0])
+
+	for i := 1; i < len(timestamps); i++ {
+		if timestamps[i] > time_+downSamplingRate.Microseconds() {
+			ts = append(ts, timestamps[i])
+			va = append(va, values[i])
+			time_ = timestamps[i]
+		}
+	}
+	block.timestamps = ts
+	block.values = va
+
 }
 
 func skipSamplesOutsideRetention(b *Block, retentionDeadline int64, rowsDeleted *uint64) {

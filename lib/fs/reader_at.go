@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/metrics"
@@ -87,6 +88,11 @@ func (r *ReaderAt) MustReadAt(p []byte, off int64) {
 		readCalls.Inc()
 		readBytes.Add(len(p))
 	}
+}
+
+func (r *ReaderAt) GetModTime() time.Time {
+	stat, _ := r.getMmapReader().f.Stat()
+	return stat.ModTime()
 }
 
 func (r *ReaderAt) getMmapReader() *mmapReader {

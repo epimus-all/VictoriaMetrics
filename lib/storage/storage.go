@@ -184,6 +184,12 @@ type OpenOptions struct {
 	TrackMetricNamesStats bool
 }
 
+type LabelDuration struct {
+	Tfs      []*TagFilters
+	Period   time.Duration
+	Interval time.Duration
+}
+
 // MustOpenStorage opens storage on the given path with the given retentionMsecs.
 func MustOpenStorage(path string, opts OpenOptions) *Storage {
 	path, err := filepath.Abs(path)
@@ -1221,6 +1227,24 @@ func nextRetentionDeadlineSeconds(atSecs, retentionSecs, offsetSecs int64) int64
 	return deadline
 }
 
+func (s *Storage) ContainsMetricId(tfss []*TagFilters, tr TimeRange, metricId uint64) bool {
+	tr = s.adjustTimeRange(tr)
+
+	idb, putIndexDB := s.getCurrIndexDB()
+	defer putIndexDB()
+	metricIDs, err := idb.searchMetricIDs(nil, tfss, tr, 1e9, 1<<64-1)
+	if err != nil {
+		return false
+	} else {
+		for _, metricID_ := range metricIDs {
+			if metricID_ == metricId {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // SearchMetricNames returns marshaled metric names matching the given tfss on
 // the given tr.
 //
@@ -2246,6 +2270,26 @@ func SetLogNewSeries(ok bool) {
 }
 
 var logNewSeries = false
+
+func SetDownSamplingPeriod(ld []LabelDuration) {
+	DownSamplingPeriod = ld
+}
+
+func GetDownSamplingPeriod() []LabelDuration {
+	return DownSamplingPeriod
+}
+
+var DownSamplingPeriod []LabelDuration
+
+func SetRetentionFilter(ld []LabelDuration) {
+	RetentionFilter = ld
+}
+
+func GetRetentionFilter() []LabelDuration {
+	return RetentionFilter
+}
+
+var RetentionFilter []LabelDuration
 
 func createAllIndexesForMetricName(is *indexSearch, mn *MetricName, tsid *TSID, date uint64) {
 	is.createGlobalIndexes(tsid, mn)
