@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/metrics"
@@ -43,6 +44,11 @@ type ReaderAt struct {
 	mrLock sync.Mutex
 
 	useLocalStats bool
+}
+
+func (r *ReaderAt) GetModTime() time.Time {
+	stat, _ := r.getMmapReader().f.Stat()
+	return stat.ModTime()
 }
 
 // Path returns path to r.

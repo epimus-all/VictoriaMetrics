@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/VictoriaMetrics/metricsql"
 	"io"
 	"net/http"
 	"os"
@@ -94,6 +95,8 @@ var (
 		"See https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#track-ingested-metrics-usage")
 	cacheSizeMetricNamesStats = flagutil.NewBytes("storage.cacheSizeMetricNamesStats", 0, "Overrides max size for storage/metricNamesStatsTracker cache. "+
 		"See https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#cache-tuning")
+	downSamplingPeriods = flagutil.NewArrayString("downsampling.period", "")
+	retentionFilters    = flagutil.NewArrayString("retentionFilter", "")
 )
 
 func main() {
@@ -113,6 +116,10 @@ func main() {
 	buildinfo.Init()
 	logger.Init()
 
+	downSamplingPeriod := getDownSamplingPeriod()
+	retentionFilterDurations := getRetentionFilterDurations()
+	storage.SetDownSamplingPeriod(downSamplingPeriod)
+	storage.SetRetentionFilter(retentionFilterDurations)
 	storage.SetDedupInterval(*minScrapeInterval)
 	storage.SetDataFlushInterval(*inmemoryDataFlushInterval)
 	storage.SetLogNewSeries(*logNewSeries)
@@ -212,6 +219,62 @@ func main() {
 	fs.MustStopDirRemover()
 
 	logger.Infof("the vmstorage has been stopped")
+}
+
+func getRetentionFilterDurations() []storage.LabelDuration {
+	lds := make([]storage.LabelDuration, len(*retentionFilters))
+	for i, retentionFilter := range *retentionFilters {
+		split := strings.Split(retentionFilter, ":")
+		var period time.Duration
+		filter, _ := metricsql.Parse(split[0])
+		labelFilter := filter.(*metricsql.MetricExpr)
+		filters_ := toTagFilters(labelFilter)
+		period, _ = timeutil.ParseDuration(split[1])
+		lds[i] = storage.LabelDuration{
+			Tfs:    filters_,
+			Period: period,
+		}
+	}
+	return lds
+}
+
+func getDownSamplingPeriod() []storage.LabelDuration {
+	lds := make([]storage.LabelDuration, len(*downSamplingPeriods))
+	for i, downSamplingPeriod := range *downSamplingPeriods {
+		split := strings.Split(downSamplingPeriod, ":")
+		var period time.Duration
+		var interval_ time.Duration
+		if len(split) == 2 {
+			period, _ = timeutil.ParseDuration(split[0])
+			interval_, _ = timeutil.ParseDuration(split[1])
+			lds[i] = storage.LabelDuration{
+				Period:   period,
+				Interval: interval_,
+			}
+		} else {
+			filter, _ := metricsql.Parse(split[0])
+			labelFilter := filter.(*metricsql.MetricExpr)
+			tfs := toTagFilters(labelFilter)
+			period, _ = timeutil.ParseDuration(split[1])
+			interval_, _ = timeutil.ParseDuration(split[2])
+			lds[i] = storage.LabelDuration{
+				Tfs:      tfs,
+				Period:   period,
+				Interval: interval_,
+			}
+		}
+	}
+	return lds
+}
+
+func toTagFilters(labelFilter *metricsql.MetricExpr) []*storage.TagFilters {
+	tfs := make([]*storage.TagFilters, len(labelFilter.LabelFilterss[0]))
+	tagFilter := storage.TagFilters{}
+	for i, s := range labelFilter.LabelFilterss[0] {
+		tagFilter.Add([]byte(s.Label), []byte(s.Value), s.IsNegative, s.IsRegexp)
+		tfs[i] = &tagFilter
+	}
+	return tfs
 }
 
 func newRequestHandler(strg *storage.Storage) httpserver.RequestHandler {
