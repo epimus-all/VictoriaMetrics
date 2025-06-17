@@ -1765,6 +1765,7 @@ func (pt *partition) getPartsToMerge(pws []*partWrapper, maxOutBytes uint64) []*
 	pwsToMerge := appendPartsToMerge(nil, pwsRemaining, defaultPartsToMerge, maxOutBytes)
 
 	if len(pwsToMerge) == 0 {
+		logger.Infof("begin to pwsToMerge")
 		for _, pw := range pws {
 			if isAvailable(pw) {
 				if pw.p.size > maxOutBytes || pw.isInMerge {
@@ -1772,6 +1773,7 @@ func (pt *partition) getPartsToMerge(pws []*partWrapper, maxOutBytes uint64) []*
 				}
 				//downsampling or retention filter one by one
 				pwsToMerge = append(pwsToMerge, pw)
+				logger.Infof("begin to pwsToMerge, len = %d", len(pwsToMerge))
 				break
 			}
 		}
