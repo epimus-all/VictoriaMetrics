@@ -260,12 +260,15 @@ func downSampling(block *Block, downSamplingRate time.Duration) {
 	var va []int64
 	timestamps := block.timestamps
 	values := block.values
+	if len(timestamps) == 0 {
+		return
+	}
 	var time_ = timestamps[0]
 	ts = append(ts, timestamps[0])
 	va = append(va, values[0])
 
 	for i := 1; i < len(timestamps); i++ {
-		if timestamps[i] > time_+downSamplingRate.Microseconds() {
+		if timestamps[i] > time_+downSamplingRate.Milliseconds() {
 			ts = append(ts, timestamps[i])
 			va = append(va, values[i])
 			time_ = timestamps[i]
