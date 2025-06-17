@@ -86,6 +86,7 @@ func mergeBlockStreamsInternal(s *Storage, ph *partHeader, bsw *blockStreamWrite
 		}
 		if isRetentionFilterAvailable(s, b) {
 			localRowsDeleted += uint64(b.bh.RowsCount)
+			logger.Infof("isRetentionFilterAvailable target, MetricID = %d", b.bh.TSID.MetricID)
 			continue
 		}
 		retentionDeadline := bsm.getRetentionDeadline(&b.bh)
@@ -107,6 +108,10 @@ func mergeBlockStreamsInternal(s *Storage, ph *partHeader, bsw *blockStreamWrite
 			// Write the pendingBlock and then deal with b.
 			if b.bh.TSID.Less(&pendingBlock.bh.TSID) {
 				logger.Panicf("BUG: the next TSID=%+v is smaller than the current TSID=%+v", &b.bh.TSID, &pendingBlock.bh.TSID)
+			}
+			available, duration := isDownSamplingAvailable(s, pendingBlock)
+			if available {
+				downSampling(pendingBlock, duration)
 			}
 			bsw.WriteExternalBlock(pendingBlock, ph, &localRowsMerged)
 			pendingBlock.CopyFrom(b)
@@ -268,7 +273,7 @@ func downSampling(block *Block, downSamplingRate time.Duration) {
 	}
 	block.timestamps = ts
 	block.values = va
-
+	logger.Infof("downSampling: MetricID=%d", block.bh.TSID.MetricID)
 }
 
 func skipSamplesOutsideRetention(b *Block, retentionDeadline int64, rowsDeleted *uint64) {
