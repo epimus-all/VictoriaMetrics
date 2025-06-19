@@ -632,7 +632,7 @@ func (pt *partition) inmemoryPartsMerger() {
 		maxOutBytes := pt.getMaxBigPartSize()
 
 		pt.partsLock.Lock()
-		pws := pt.getPartsToMerge(pt.inmemoryParts, maxOutBytes)
+		pws := pt.getPartsToMerge(pt.inmemoryParts, maxOutBytes, true)
 		pt.partsLock.Unlock()
 
 		if len(pws) == 0 {
@@ -665,7 +665,7 @@ func (pt *partition) smallPartsMerger() {
 		maxOutBytes := pt.getMaxBigPartSize()
 
 		pt.partsLock.Lock()
-		pws := pt.getPartsToMerge(pt.smallParts, maxOutBytes)
+		pws := pt.getPartsToMerge(pt.smallParts, maxOutBytes, true)
 		pt.partsLock.Unlock()
 
 		if len(pws) == 0 {
@@ -731,7 +731,7 @@ func (pt *partition) partsMerger(parts []*partWrapper, c chan struct{}, path str
 		maxOutBytes := pt.getMaxBigPartSize()
 
 		pt.partsLock.Lock()
-		pws := pt.getPartsToMerge(parts, maxOutBytes)
+		pws := pt.getPartsToMerge(parts, maxOutBytes, false)
 		pt.partsLock.Unlock()
 
 		if len(pws) == 0 {
@@ -764,7 +764,7 @@ func (pt *partition) bigPartsMerger() {
 		maxOutBytes := pt.getMaxBigPartSize()
 
 		pt.partsLock.Lock()
-		pws := pt.getPartsToMerge(pt.bigParts, maxOutBytes)
+		pws := pt.getPartsToMerge(pt.bigParts, maxOutBytes, true)
 		pt.partsLock.Unlock()
 
 		if len(pws) == 0 {
@@ -1831,7 +1831,7 @@ func (pt *partition) removeStaleParts() {
 // getPartsToMerge returns optimal parts to merge from pws.
 //
 // The summary size of the returned parts must be smaller than maxOutBytes.
-func (pt *partition) getPartsToMerge(pws []*partWrapper, maxOutBytes uint64) []*partWrapper {
+func (pt *partition) getPartsToMerge(pws []*partWrapper, maxOutBytes uint64, sizeFilter bool) []*partWrapper {
 	pwsRemaining := make([]*partWrapper, 0, len(pws))
 	for _, pw := range pws {
 		if !pw.isInMerge {
@@ -1839,7 +1839,7 @@ func (pt *partition) getPartsToMerge(pws []*partWrapper, maxOutBytes uint64) []*
 		}
 	}
 
-	pwsToMerge := appendPartsToMerge(nil, pwsRemaining, defaultPartsToMerge, maxOutBytes)
+	pwsToMerge := appendPartsToMerge(nil, pwsRemaining, defaultPartsToMerge, maxOutBytes, sizeFilter)
 
 	for _, pw := range pwsToMerge {
 		if pw.isInMerge {
@@ -1873,7 +1873,7 @@ func isAvailable(pw *partWrapper) bool {
 //
 // the pws items are replaced by nil after the call. This is needed for helping Go GC to reclaim the referenced items.
 func getPartsForOptimalMerge(pws []*partWrapper) ([]*partWrapper, []*partWrapper) {
-	pwsToMerge := appendPartsToMerge(nil, pws, defaultPartsToMerge, 1<<64-1)
+	pwsToMerge := appendPartsToMerge(nil, pws, defaultPartsToMerge, 1<<64-1, true)
 	if len(pwsToMerge) == 0 {
 		return pws, nil
 	}
@@ -1903,8 +1903,8 @@ func getPartsForOptimalMerge(pws []*partWrapper) ([]*partWrapper, []*partWrapper
 const minMergeMultiplier = 1.7
 
 // appendPartsToMerge finds optimal parts to merge from src, appends them to dst and returns the result.
-func appendPartsToMerge(dst, src []*partWrapper, maxPartsToMerge int, maxOutBytes uint64) []*partWrapper {
-	if len(src) < 2 {
+func appendPartsToMerge(dst, src []*partWrapper, maxPartsToMerge int, maxOutBytes uint64, sizeFilter bool) []*partWrapper {
+	if len(src) < 1 {
 		// There is no need in merging zero or one part :)
 		return dst
 	}
@@ -1914,15 +1914,17 @@ func appendPartsToMerge(dst, src []*partWrapper, maxPartsToMerge int, maxOutByte
 
 	// Filter out too big parts.
 	// This should reduce N for O(N^2) algorithm below.
-	maxInPartBytes := uint64(float64(maxOutBytes) / minMergeMultiplier)
-	tmp := make([]*partWrapper, 0, len(src))
-	for _, pw := range src {
-		if pw.p.size > maxInPartBytes {
-			continue
+	if sizeFilter {
+		maxInPartBytes := uint64(float64(maxOutBytes) / minMergeMultiplier)
+		tmp := make([]*partWrapper, 0, len(src))
+		for _, pw := range src {
+			if pw.p.size > maxInPartBytes {
+				continue
+			}
+			tmp = append(tmp, pw)
 		}
-		tmp = append(tmp, pw)
+		src = tmp
 	}
-	src = tmp
 
 	sortPartsForOptimalMerge(src)
 
