@@ -51,6 +51,8 @@ const pendingRowsFlushInterval = 2 * time.Second
 // The interval for guaranteed flush of recently ingested data from memory to on-disk parts, so they survive process crash.
 var dataFlushInterval = 5 * time.Second
 
+var compactionInterval = 1 * time.Minute
+
 // SetDataFlushInterval sets the interval for guaranteed flush of recently ingested data from memory to disk.
 //
 // The data can be flushed from memory to disk more frequently if it doesn't fit the memory limit.
@@ -224,6 +226,7 @@ func (pt *partition) startBackgroundWorkers() {
 	pt.startPendingRowsFlusher()
 	pt.startInmemoryPartsFlusher()
 	pt.startStalePartsRemover()
+	pt.startCompaction()
 }
 
 // Drop drops all the data on the storage for the given pt.
@@ -629,7 +632,7 @@ func (pt *partition) inmemoryPartsMerger() {
 		maxOutBytes := pt.getMaxBigPartSize()
 
 		pt.partsLock.Lock()
-		pws := pt.getPartsToMerge(pt.inmemoryParts, maxOutBytes)
+		pws := pt.getPartsToMerge(pt.inmemoryParts, maxOutBytes, true)
 		pt.partsLock.Unlock()
 
 		if len(pws) == 0 {
@@ -662,7 +665,7 @@ func (pt *partition) smallPartsMerger() {
 		maxOutBytes := pt.getMaxBigPartSize()
 
 		pt.partsLock.Lock()
-		pws := pt.getPartsToMerge(pt.smallParts, maxOutBytes)
+		pws := pt.getPartsToMerge(pt.smallParts, maxOutBytes, true)
 		pt.partsLock.Unlock()
 
 		if len(pws) == 0 {
@@ -687,6 +690,72 @@ func (pt *partition) smallPartsMerger() {
 	}
 }
 
+func (pt *partition) compact() {
+	// Do not add jitter to d in order to guarantee the flush interval
+	d := compactionInterval
+	ticker := time.NewTicker(d)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-pt.stopCh:
+			return
+		case <-ticker.C:
+			pt.doCompact()
+		}
+	}
+}
+
+func (pt *partition) doCompact() {
+	logger.Infof("Compacting partition %q", pt.name)
+	pt.partsMerger(pt.compactFilter(pt.smallParts), smallPartsConcurrencyCh, pt.smallPartsPath)
+	pt.partsMerger(pt.compactFilter(pt.bigParts), bigPartsConcurrencyCh, pt.bigPartsPath)
+	logger.Infof("Compacting finished %q", pt.name)
+}
+
+func (pt *partition) compactFilter(parts []*partWrapper) []*partWrapper {
+	pwsToMerge := make([]*partWrapper, 0, len(parts))
+	for _, pw := range parts {
+		if isAvailable(pw) && !pw.isInMerge {
+			//downsampling or retention filter one by one
+			pwsToMerge = append(pwsToMerge, pw)
+		}
+	}
+	return pwsToMerge
+}
+
+func (pt *partition) partsMerger(parts []*partWrapper, c chan struct{}, path string) {
+	for {
+		if pt.s.isReadOnly.Load() {
+			return
+		}
+		maxOutBytes := pt.getMaxBigPartSize()
+
+		pt.partsLock.Lock()
+		pws := pt.getPartsToMerge(parts, maxOutBytes, false)
+		pt.partsLock.Unlock()
+
+		if len(pws) == 0 {
+			// Nothing to merge
+			return
+		}
+
+		c <- struct{}{}
+		err := pt.mergeParts(pws, pt.stopCh, false, false)
+		<-c
+
+		if err == nil {
+			// Try merging additional parts.
+			continue
+		}
+		if errors.Is(err, errForciblyStopped) {
+			// Nothing to do - finish the merger.
+			return
+		}
+		// Unexpected error.
+		logger.Panicf("FATAL: unrecoverable error when merging parts at %q: %s", path, err)
+	}
+}
+
 func (pt *partition) bigPartsMerger() {
 	for {
 		if pt.s.isReadOnly.Load() {
@@ -695,7 +764,7 @@ func (pt *partition) bigPartsMerger() {
 		maxOutBytes := pt.getMaxBigPartSize()
 
 		pt.partsLock.Lock()
-		pws := pt.getPartsToMerge(pt.bigParts, maxOutBytes)
+		pws := pt.getPartsToMerge(pt.bigParts, maxOutBytes, true)
 		pt.partsLock.Unlock()
 
 		if len(pws) == 0 {
@@ -1026,6 +1095,14 @@ func (pt *partition) startStalePartsRemover() {
 	pt.wg.Add(1)
 	go func() {
 		pt.stalePartsRemover()
+		pt.wg.Done()
+	}()
+}
+
+func (pt *partition) startCompaction() {
+	pt.wg.Add(1)
+	go func() {
+		pt.compact()
 		pt.wg.Done()
 	}()
 }
@@ -1753,7 +1830,7 @@ func (pt *partition) removeStaleParts() {
 // getPartsToMerge returns optimal parts to merge from pws.
 //
 // The summary size of the returned parts must be smaller than maxOutBytes.
-func (pt *partition) getPartsToMerge(pws []*partWrapper, maxOutBytes uint64) []*partWrapper {
+func (pt *partition) getPartsToMerge(pws []*partWrapper, maxOutBytes uint64, sizeFilter bool) []*partWrapper {
 	pwsRemaining := make([]*partWrapper, 0, len(pws))
 	for _, pw := range pws {
 		if !pw.isInMerge {
@@ -1761,20 +1838,7 @@ func (pt *partition) getPartsToMerge(pws []*partWrapper, maxOutBytes uint64) []*
 		}
 	}
 
-	pwsToMerge := appendPartsToMerge(nil, pwsRemaining, defaultPartsToMerge, maxOutBytes)
-
-	if len(pwsToMerge) == 0 {
-		for _, pw := range pws {
-			if isAvailable(pw) {
-				if pw.p.size > maxOutBytes || pw.isInMerge {
-					continue
-				}
-				//downsampling or retention filter one by one
-				pwsToMerge = append(pwsToMerge, pw)
-				break
-			}
-		}
-	}
+	pwsToMerge := appendPartsToMerge(nil, pwsRemaining, defaultPartsToMerge, maxOutBytes, sizeFilter)
 
 	for _, pw := range pwsToMerge {
 		if pw.isInMerge {
@@ -1808,7 +1872,7 @@ func isAvailable(pw *partWrapper) bool {
 //
 // the pws items are replaced by nil after the call. This is needed for helping Go GC to reclaim the referenced items.
 func getPartsForOptimalMerge(pws []*partWrapper) ([]*partWrapper, []*partWrapper) {
-	pwsToMerge := appendPartsToMerge(nil, pws, defaultPartsToMerge, 1<<64-1)
+	pwsToMerge := appendPartsToMerge(nil, pws, defaultPartsToMerge, 1<<64-1, true)
 	if len(pwsToMerge) == 0 {
 		return pws, nil
 	}
@@ -1838,8 +1902,8 @@ func getPartsForOptimalMerge(pws []*partWrapper) ([]*partWrapper, []*partWrapper
 const minMergeMultiplier = 1.7
 
 // appendPartsToMerge finds optimal parts to merge from src, appends them to dst and returns the result.
-func appendPartsToMerge(dst, src []*partWrapper, maxPartsToMerge int, maxOutBytes uint64) []*partWrapper {
-	if len(src) < 2 {
+func appendPartsToMerge(dst, src []*partWrapper, maxPartsToMerge int, maxOutBytes uint64, sizeFilter bool) []*partWrapper {
+	if len(src) < 1 {
 		// There is no need in merging zero or one part :)
 		return dst
 	}
@@ -1849,15 +1913,17 @@ func appendPartsToMerge(dst, src []*partWrapper, maxPartsToMerge int, maxOutByte
 
 	// Filter out too big parts.
 	// This should reduce N for O(N^2) algorithm below.
-	maxInPartBytes := uint64(float64(maxOutBytes) / minMergeMultiplier)
-	tmp := make([]*partWrapper, 0, len(src))
-	for _, pw := range src {
-		if pw.p.size > maxInPartBytes {
-			continue
+	if sizeFilter {
+		maxInPartBytes := uint64(float64(maxOutBytes) / minMergeMultiplier)
+		tmp := make([]*partWrapper, 0, len(src))
+		for _, pw := range src {
+			if pw.p.size > maxInPartBytes {
+				continue
+			}
+			tmp = append(tmp, pw)
 		}
-		tmp = append(tmp, pw)
+		src = tmp
 	}
-	src = tmp
 
 	sortPartsForOptimalMerge(src)
 
