@@ -51,6 +51,8 @@ const pendingRowsFlushInterval = 2 * time.Second
 // The interval for guaranteed flush of recently ingested data from memory to on-disk parts, so they survive process crash.
 var dataFlushInterval = 5 * time.Second
 
+var compactionInterval = 1 * time.Minute
+
 // SetDataFlushInterval sets the interval for guaranteed flush of recently ingested data from memory to disk.
 //
 // The data can be flushed from memory to disk more frequently if it doesn't fit the memory limit.
@@ -224,6 +226,7 @@ func (pt *partition) startBackgroundWorkers() {
 	pt.startPendingRowsFlusher()
 	pt.startInmemoryPartsFlusher()
 	pt.startStalePartsRemover()
+	pt.startCompaction()
 }
 
 // Drop drops all the data on the storage for the given pt.
@@ -687,6 +690,72 @@ func (pt *partition) smallPartsMerger() {
 	}
 }
 
+func (pt *partition) compact() {
+	// Do not add jitter to d in order to guarantee the flush interval
+	d := compactionInterval
+	ticker := time.NewTicker(d)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-pt.stopCh:
+			return
+		case <-ticker.C:
+			pt.doCompact()
+		}
+	}
+}
+
+func (pt *partition) doCompact() {
+	logger.Infof("Compacting partition %q", pt.name)
+	pt.partsMerger(pt.compactFilter(pt.smallParts), smallPartsConcurrencyCh, pt.smallPartsPath)
+	pt.partsMerger(pt.compactFilter(pt.bigParts), bigPartsConcurrencyCh, pt.bigPartsPath)
+	logger.Infof("Compacting finished %q", pt.name)
+}
+
+func (pt *partition) compactFilter(parts []*partWrapper) []*partWrapper {
+	pwsToMerge := make([]*partWrapper, 0, len(parts))
+	for _, pw := range parts {
+		if isAvailable(pw) && !pw.isInMerge {
+			//downsampling or retention filter one by one
+			pwsToMerge = append(pwsToMerge, pw)
+		}
+	}
+	return pwsToMerge
+}
+
+func (pt *partition) partsMerger(parts []*partWrapper, c chan struct{}, path string) {
+	for {
+		if pt.s.isReadOnly.Load() {
+			return
+		}
+		maxOutBytes := pt.getMaxBigPartSize()
+
+		pt.partsLock.Lock()
+		pws := pt.getPartsToMerge(parts, maxOutBytes)
+		pt.partsLock.Unlock()
+
+		if len(pws) == 0 {
+			// Nothing to merge
+			return
+		}
+
+		c <- struct{}{}
+		err := pt.mergeParts(pws, pt.stopCh, false, false)
+		<-c
+
+		if err == nil {
+			// Try merging additional parts.
+			continue
+		}
+		if errors.Is(err, errForciblyStopped) {
+			// Nothing to do - finish the merger.
+			return
+		}
+		// Unexpected error.
+		logger.Panicf("FATAL: unrecoverable error when merging parts at %q: %s", path, err)
+	}
+}
+
 func (pt *partition) bigPartsMerger() {
 	for {
 		if pt.s.isReadOnly.Load() {
@@ -1026,6 +1095,14 @@ func (pt *partition) startStalePartsRemover() {
 	pt.wg.Add(1)
 	go func() {
 		pt.stalePartsRemover()
+		pt.wg.Done()
+	}()
+}
+
+func (pt *partition) startCompaction() {
+	pt.wg.Add(1)
+	go func() {
+		pt.compact()
 		pt.wg.Done()
 	}()
 }
@@ -1763,21 +1840,6 @@ func (pt *partition) getPartsToMerge(pws []*partWrapper, maxOutBytes uint64) []*
 	}
 
 	pwsToMerge := appendPartsToMerge(nil, pwsRemaining, defaultPartsToMerge, maxOutBytes)
-
-	if len(pwsToMerge) == 0 {
-		logger.Infof("begin to pwsToMerge")
-		for _, pw := range pws {
-			if isAvailable(pw) {
-				if pw.p.size > maxOutBytes || pw.isInMerge {
-					continue
-				}
-				//downsampling or retention filter one by one
-				pwsToMerge = append(pwsToMerge, pw)
-				logger.Infof("begin to pwsToMerge, len = %d", len(pwsToMerge))
-				break
-			}
-		}
-	}
 
 	for _, pw := range pwsToMerge {
 		if pw.isInMerge {
