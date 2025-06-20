@@ -51,7 +51,7 @@ const pendingRowsFlushInterval = 2 * time.Second
 // The interval for guaranteed flush of recently ingested data from memory to on-disk parts, so they survive process crash.
 var dataFlushInterval = 5 * time.Second
 
-var compactionInterval = 1 * time.Minute
+var compactionInterval = 10 * time.Minute
 
 // SetDataFlushInterval sets the interval for guaranteed flush of recently ingested data from memory to disk.
 //
@@ -1864,6 +1864,7 @@ func isAvailable(pw *partWrapper) bool {
 		neverDoIt := at.GetModTime().UnixMilli()-pw.p.ph.MaxTimestamp < duration.Period.Milliseconds()
 		timeOut := time.Now().UnixMilli()-pw.p.ph.MaxTimestamp > duration.Period.Milliseconds()
 		result := neverDoIt && timeOut
+		logger.Infof("isAvailable, file = %s, timestamp = %s, neverDoIt = %t, timeOut = %t", at.GetModTime(), time.UnixMilli(pw.p.ph.MaxTimestamp), neverDoIt, timeOut)
 		return result
 	}
 	return false
