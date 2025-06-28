@@ -165,6 +165,7 @@ func (bsw *blockStreamWriter) Finish() error {
 	}
 	delete(globalUpdateIdMap, mergeId)
 	delete(globalPartNumberMap, mergeId)
+	delete(globalOffsetMap, mergeId)
 	delete(globalUploadPartMap, mergeId)
 	delete(globalBufferMap, mergeId)
 	return nil
