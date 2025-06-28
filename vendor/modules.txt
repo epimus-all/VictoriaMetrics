@@ -6,6 +6,12 @@ cloud.google.com/go/internal/trace
 cloud.google.com/go/internal/version
 # cloud.google.com/go/auth v0.16.1
 ## explicit; go 1.23.0
+github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss
+github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials
+github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/crypto
+github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/retry
+github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/signer
+github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/transport
 cloud.google.com/go/auth
 cloud.google.com/go/auth/credentials
 cloud.google.com/go/auth/credentials/internal/externalaccount

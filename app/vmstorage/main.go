@@ -95,8 +95,13 @@ var (
 		"See https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#track-ingested-metrics-usage")
 	cacheSizeMetricNamesStats = flagutil.NewBytes("storage.cacheSizeMetricNamesStats", 0, "Overrides max size for storage/metricNamesStatsTracker cache. "+
 		"See https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#cache-tuning")
-	downSamplingPeriods = flagutil.NewArrayString("downsampling.period", "")
-	retentionFilters    = flagutil.NewArrayString("retentionFilter", "")
+	downSamplingPeriods       = flagutil.NewArrayString("downsampling.period", "")
+	retentionFilters          = flagutil.NewArrayString("retentionFilter", "")
+	objectStorageFilters      = flagutil.NewArrayString("objectStorageFilter", "")
+	objectStoragePeriod       = flag.Duration("objectStoragePeriod", 30*24*time.Hour, "")
+	Region                    = flag.String("oss.region", "", "The oss param")
+	OssBucket                 = flag.String("oss.bucket", "", "The oss bucket")
+	objectStorageShardingKeys = flag.String("objectStorageShardingKeys", "", "objectStorageShardingKeys")
 )
 
 func main() {
@@ -135,6 +140,16 @@ func main() {
 	mergeset.SetIndexBlocksCacheSize(cacheSizeIndexDBIndexBlocks.IntN())
 	mergeset.SetDataBlocksCacheSize(cacheSizeIndexDBDataBlocks.IntN())
 	mergeset.SetDataBlocksSparseCacheSize(cacheSizeIndexDBDataBlocksSparse.IntN())
+	storage.SetObjectStorageShardingKeys(strings.Split(*objectStorageShardingKeys, ","))
+	storage.InitOss(storage.OssConfig{
+		Region:     *Region,
+		BucketName: *OssBucket,
+	})
+	storage.SetObjectStorageShardingKeys(strings.Split(*objectStorageShardingKeys, ","))
+	storage.InitOss(storage.OssConfig{
+		Region:     *Region,
+		BucketName: *OssBucket,
+	})
 
 	if retentionPeriod.Duration() < 24*time.Hour {
 		logger.Fatalf("-retentionPeriod cannot be smaller than a day; got %s", retentionPeriod)
@@ -219,6 +234,23 @@ func main() {
 	fs.MustStopDirRemover()
 
 	logger.Infof("the vmstorage has been stopped")
+}
+
+func GetObjectStorageFilters() []storage.LabelDuration {
+	lds := make([]storage.LabelDuration, len(*objectStorageFilters))
+	for i, objectStoragePeriod := range *objectStorageFilters {
+		split := strings.Split(objectStoragePeriod, ":")
+		var period time.Duration
+		filter, _ := metricsql.Parse(split[0])
+		labelFilter := filter.(*metricsql.MetricExpr)
+		filters_ := toTagFilters(labelFilter)
+		period, _ = timeutil.ParseDuration(split[1])
+		lds[i] = storage.LabelDuration{
+			Tfs:    filters_,
+			Period: period,
+		}
+	}
+	return lds
 }
 
 func getRetentionFilterDurations() []storage.LabelDuration {

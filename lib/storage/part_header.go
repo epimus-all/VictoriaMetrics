@@ -31,6 +31,9 @@ type partHeader struct {
 
 	// MinDedupInterval is minimal dedup interval in milliseconds across all the blocks in the part.
 	MinDedupInterval int64
+
+	// Whether the values files storages in Object Storage
+	IsObjectStorage bool
 }
 
 // String returns string representation of ph.
@@ -126,6 +129,11 @@ func (ph *partHeader) ParseFromPath(path string) error {
 
 	if err := ph.readMinDedupInterval(path); err != nil {
 		return fmt.Errorf("cannot read min dedup interval: %w", err)
+	}
+
+	ph.IsObjectStorage, err = strconv.ParseBool(a[5])
+	if err != nil {
+		return fmt.Errorf("cannot parse IsObjectStorage from partName %q: %w", partName, err)
 	}
 
 	return nil

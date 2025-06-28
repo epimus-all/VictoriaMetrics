@@ -175,6 +175,16 @@ type Storage struct {
 	metricsTracker *metricnamestats.Tracker
 }
 
+var s Storage
+
+func SetStorage(storage Storage) {
+	s = storage
+}
+
+func getStorage() Storage {
+	return s
+}
+
 type pendingHourMetricIDEntry struct {
 	AccountID uint32
 	ProjectID uint32
@@ -1282,6 +1292,18 @@ func nextRetentionDeadlineSeconds(atSecs, retentionSecs, offsetSecs int64) int64
 	deadline -= offsetSecs
 
 	return deadline
+}
+
+func (s *Storage) GetMetricNameByMetricId(metricId uint64) MetricName {
+	db, _ := s.getCurrIndexDB()
+	search := db.getIndexSearch(0, 0, noDeadline)
+	var dst []byte
+	dst, _ = search.searchMetricName(dst[:0], metricId)
+	var mn MetricName
+	if err := mn.Unmarshal(dst); err != nil {
+		logger.Panicf("FATAL: cannot unmarshal metricName %q: %s", dst, err)
+	}
+	return mn
 }
 
 func (s *Storage) ContainsMetricId(tfss []*TagFilters, tr TimeRange, metricId uint64) bool {
@@ -2415,6 +2437,41 @@ func SetLogNewSeries(ok bool) {
 }
 
 var logNewSeries = false
+
+func SetObjectStorageShardingKeys(ld []string) {
+	ObjectStorageShardingKeys = ld
+}
+
+func GetObjectStorageShardingKeys() []string {
+	return ObjectStorageShardingKeys
+}
+
+var ObjectStorageShardingKeys []string
+
+func SetObjectStorageFilters(ld []LabelDuration) {
+	ObjectStorageFilters = ld
+}
+
+func GetObjectStorageFilters() []LabelDuration {
+	return ObjectStorageFilters
+}
+
+var ObjectStorageFilters []LabelDuration
+
+func SetObjectStoragePeriod(ld time.Duration) {
+	ObjectStoragePeriod = ld
+}
+
+func GetObjectStoragePeriod() time.Duration {
+	return ObjectStoragePeriod
+}
+
+var ObjectStoragePeriod time.Duration
+
+type OssConfig struct {
+	Region     string
+	BucketName string
+}
 
 func createAllIndexesForMetricName(is *indexSearch, mn *MetricName, tsid *TSID, date uint64) {
 	is.createGlobalIndexes(tsid, mn)

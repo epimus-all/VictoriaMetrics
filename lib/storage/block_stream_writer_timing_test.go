@@ -21,6 +21,15 @@ func BenchmarkBlockStreamWriterRowsBestCase(b *testing.B) {
 	benchmarkBlockStreamWriter(b, benchBlocksBestCase, len(benchRawRowsBestCase), true)
 }
 
+func BenchmarkBlockStreamWriterRowsBestCases(b *testing.B) {
+	var bb = Block{
+		values:     []int64{11, 12, 13, 14, 15},
+		timestamps: []int64{1750065000000, 1750065000001, 1750065060000, 1750065180000, 1750065240000},
+	}
+	bb.adjustValues()
+
+}
+
 func benchmarkBlockStreamWriter(b *testing.B, ebs []Block, rowsCount int, writeRows bool) {
 	b.ReportAllocs()
 	b.SetBytes(int64(rowsCount))
@@ -49,7 +58,7 @@ func benchmarkBlockStreamWriter(b *testing.B, ebs []Block, rowsCount int, writeR
 
 			bsw.MustInitFromInmemoryPart(&mp, -5)
 			for i := range ebsCopy {
-				bsw.WriteExternalBlock(&ebsCopy[i], &ph, &rowsMerged)
+				bsw.WriteExternalBlock(nil, &ebsCopy[i], &ph, &rowsMerged, partInmemory)
 			}
 			bsw.MustClose()
 			mp.Reset()

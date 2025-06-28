@@ -2,14 +2,17 @@ package storage
 
 import (
 	"bytes"
-	"path/filepath"
-	"sync"
-
+	"encoding/base64"
+	"fmt"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/atomicutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/encoding"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/filestream"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fs"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
+	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
+	"path/filepath"
+	"strings"
+	"sync"
 )
 
 // blockStreamWriter represents block stream writer.
@@ -130,8 +133,66 @@ func (bsw *blockStreamWriter) MustClose() {
 	bsw.reset()
 }
 
+func (bsw *blockStreamWriter) Finish() error {
+	mergeId := bsw.getMergeId()
+	if mergeId == "" {
+		return nil
+	}
+	m, ok := globalUpdateIdMap[mergeId]
+	if !ok {
+		return nil
+	}
+	for shardingKey, uploadId := range m {
+		//objectName := mergeId + "-values.bin"
+		objectName := getObjectName(shardingKey, mergeId)
+		buffer := globalBufferMap[mergeId][shardingKey]
+		i := globalPartNumberMap[mergeId][shardingKey]
+		uploadParts := globalUploadPartMap[mergeId][shardingKey]
+		if buffer.Len() > 0 {
+			uploadPart, err := ossWriteData(objectName, uploadId, *i, buffer.Bytes())
+			if err != nil {
+				return err
+			}
+			uploadParts = append(uploadParts, uploadPart)
+		}
+		if uploadParts == nil {
+			continue
+		}
+		err := CompleteMultipartUpload(uploadId, objectName, uploadParts)
+		if err != nil {
+			return err
+		}
+	}
+	delete(globalUpdateIdMap, mergeId)
+	delete(globalPartNumberMap, mergeId)
+	delete(globalOffsetMap, mergeId)
+	delete(globalUploadPartMap, mergeId)
+	delete(globalBufferMap, mergeId)
+	return nil
+}
+
+func getObjectName(shardingKey string, mergeId string) string {
+	return shardingKey + "/" + mergeId + "-values.bin"
+}
+
+var (
+	globalUpdateIdMap   = make(map[string]map[string]string)
+	globalPartNumberMap = make(map[string]map[string]*int32)
+	globalOffsetMap     = make(map[string]map[string]*uint64)
+	globalUploadPartMap = make(map[string]map[string][]oss.UploadPart)
+	globalBufferMap     = make(map[string]map[string]*bytes.Buffer)
+)
+
 // WriteExternalBlock writes b to bsw and updates ph and rowsMerged.
-func (bsw *blockStreamWriter) WriteExternalBlock(b *Block, ph *partHeader, rowsMerged *uint64) {
+func (bsw *blockStreamWriter) WriteExternalBlock(s *Storage, b *Block, ph *partHeader, rowsMerged *uint64, dstPartType partType) {
+	mergeId := bsw.getMergeId()
+	isOss := dstPartType != partInmemory && isObjectStorageAvailable(s, b) && len(mergeId) > 0
+	if isOss {
+		b.adjustValues()
+		if len(b.values) == 0 {
+			return
+		}
+	}
 	*rowsMerged += uint64(b.rowsCount())
 	b.deduplicateSamplesDuringMerge()
 	headerData, timestampsData, valuesData := b.MarshalData(bsw.timestampsBlockOffset, bsw.valuesBlockOffset)
@@ -151,15 +212,151 @@ func (bsw *blockStreamWriter) WriteExternalBlock(b *Block, ph *partHeader, rowsM
 	bsw.indexData = append(bsw.indexData, headerData...)
 	bsw.mr.RegisterBlockHeader(&b.bh)
 
-	if !usePrevTimestamps {
-		bsw.prevTimestampsData = append(bsw.prevTimestampsData[:0], timestampsData...)
-		bsw.prevTimestampsBlockOffset = bsw.timestampsBlockOffset
-		fs.MustWriteData(bsw.timestampsWriter, timestampsData)
-		bsw.timestampsBlockOffset += uint64(len(timestampsData))
+	if isOss {
+		shardingKey := getShardingKey(b)
+		objectName := getObjectName(shardingKey, mergeId)
+		var updateIdMap = globalUpdateIdMap[mergeId]
+		if updateIdMap == nil {
+			updateIdMap = make(map[string]string)
+			globalUpdateIdMap[mergeId] = updateIdMap
+		}
+		var partNumberMap = globalPartNumberMap[mergeId]
+		if partNumberMap == nil {
+			partNumberMap = make(map[string]*int32)
+			globalPartNumberMap[mergeId] = partNumberMap
+		}
+		var offsetMap = globalOffsetMap[mergeId]
+		if offsetMap == nil {
+			offsetMap = make(map[string]*uint64)
+			globalOffsetMap[mergeId] = offsetMap
+		}
+		var uploadPartMap = globalUploadPartMap[mergeId]
+		if uploadPartMap == nil {
+			uploadPartMap = make(map[string][]oss.UploadPart)
+			globalUploadPartMap[mergeId] = uploadPartMap
+		}
+		var bufferMap = globalBufferMap[mergeId]
+		if bufferMap == nil {
+			bufferMap = make(map[string]*bytes.Buffer)
+			globalBufferMap[mergeId] = bufferMap
+		}
+
+		uploadId, ok := updateIdMap[shardingKey]
+		if !ok {
+			u, err := InitiateMultipartUpload(objectName)
+			if err != nil {
+				fmt.Errorf("InitiateMultipartUpload error: %v", err)
+			}
+			updateIdMap[shardingKey] = u
+			uploadId = u
+		}
+		i, ok := partNumberMap[shardingKey]
+		if !ok {
+			one := int32(1)
+			i = &one
+		}
+		offset, ok := offsetMap[shardingKey]
+		if !ok {
+			zero := uint64(0)
+			offset = &zero
+		}
+		buffers, ok := bufferMap[shardingKey]
+		if !ok {
+			buffers = &bytes.Buffer{}
+			bufferMap[shardingKey] = buffers
+		}
+
+		if len(b.valuesData) > 0 {
+			buffers.Write(b.valuesData)
+			//bufferMap[shardingKey] = buffers
+			for {
+				if buffers.Len() > 100*1024 {
+					bs := make([]byte, 100*1024)
+					buffers.Read(bs)
+
+					p, err := ossWriteData(objectName, uploadId, *i, bs)
+					*i++
+					partNumberMap[shardingKey] = i
+					if err != nil {
+						fmt.Errorf("ossWriteData error: %v", err)
+					} else {
+						parts, ok := uploadPartMap[shardingKey]
+						if !ok {
+							parts = make([]oss.UploadPart, 0)
+							uploadPartMap[shardingKey] = parts
+						}
+						parts = append(parts, p)
+						uploadPartMap[shardingKey] = parts
+					}
+				} else {
+					break
+				}
+			}
+		}
+		logger.Infof("block write to buffers, metricId = %d, offset = %d, size = %d, content = %s, count = %d", b.bh.TSID.MetricID, *offset, len(valuesData), base64.StdEncoding.EncodeToString(valuesData), b.bh.RowsCount)
+		partNumberMap[shardingKey] = i
+		ph.IsObjectStorage = true
+		bsw.valuesBlockOffset = *offset
+		*offset += uint64(len(valuesData))
+		offsetMap[shardingKey] = offset
+	} else {
+		if !usePrevTimestamps {
+			bsw.prevTimestampsData = append(bsw.prevTimestampsData[:0], timestampsData...)
+			bsw.prevTimestampsBlockOffset = bsw.timestampsBlockOffset
+			fs.MustWriteData(bsw.timestampsWriter, timestampsData)
+			bsw.timestampsBlockOffset += uint64(len(timestampsData))
+		}
+		fs.MustWriteData(bsw.valuesWriter, valuesData)
+		bsw.valuesBlockOffset += uint64(len(valuesData))
+		ph.IsObjectStorage = false
 	}
-	fs.MustWriteData(bsw.valuesWriter, valuesData)
-	bsw.valuesBlockOffset += uint64(len(valuesData))
 	updatePartHeader(b, ph)
+}
+
+func (bsw *blockStreamWriter) getMergeId() string {
+	writer, ok := bsw.indexWriter.(*filestream.Writer)
+	if !ok {
+		return ""
+	}
+	writer.Path()
+	split := strings.Split(writer.Path(), "/")
+	return split[len(split)-2]
+}
+
+func (b *Block) adjustValues() {
+	if len(b.values) == 0 || len(b.timestamps) == 0 {
+		return
+	}
+	timestamps := b.timestamps
+	values := b.values
+	vs := make([]int64, 0)
+	ts := make([]int64, 0)
+	lastTimeStamps := timestamps[len(timestamps)-1]
+	value := values[0]
+	timestamp := timestamps[0]
+	times := (lastTimeStamps-timestamp)/ObjectStepDuring + 1
+	vs = append(vs, value)
+	ts = append(ts, timestamp)
+
+	step := 1
+	for i := 1; i < int(times); i++ {
+		minTimestamp := timestamp + int64((i-1)*ObjectStepDuring)
+		maxTimestamp := timestamp + int64(i*ObjectStepDuring)
+		temp := int64(1<<63 - 2) //NaN
+		for j := step; j < len(values); j++ {
+			if timestamps[j] > maxTimestamp {
+				break
+			} else if timestamps[j] <= minTimestamp {
+				continue
+			}
+			temp = values[j]
+			step = j
+		}
+		vs = append(vs, temp)
+		ts = append(ts, maxTimestamp)
+	}
+	b.values = vs
+	b.timestamps = ts
 }
 
 var (

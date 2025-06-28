@@ -1,18 +1,20 @@
 package storage
 
 import (
+	"encoding/base64"
 	"fmt"
-	"io"
-	"strings"
-
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/bytesutil"
-	"github.com/VictoriaMetrics/VictoriaMetrics/lib/encoding"
+	encoding "github.com/VictoriaMetrics/VictoriaMetrics/lib/encoding"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fasttime"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/querytracer"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/slicesutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/stringsutil"
+	"io"
+	"strings"
 )
+
+const ObjectStepDuring = 60 * 1000
 
 // BlockRef references a Block.
 //
@@ -38,11 +40,23 @@ func (br *BlockRef) MustReadBlock(dst *Block) {
 	dst.Reset()
 	dst.bh = br.bh
 
-	dst.timestampsData = bytesutil.ResizeNoCopyMayOverallocate(dst.timestampsData, int(br.bh.TimestampsBlockSize))
-	br.p.timestampsFile.MustReadAt(dst.timestampsData, int64(br.bh.TimestampsBlockOffset))
+	if br.p.ph.IsObjectStorage {
+		objectName := getObjectName(getShardingKey(dst), br.p.IndexIdx())
+		if br.bh.ValuesBlockSize == 0 {
+			dst.valuesData = make([]byte, 0)
+		} else {
+			dst.valuesData = ossReadData(objectName, int64(br.bh.ValuesBlockOffset), int64(br.bh.ValuesBlockSize))
+			logger.Infof("ossReadData metricId = %s, valuesData = %s", dst.bh.TSID.MetricID, base64.StdEncoding.EncodeToString(dst.valuesData))
+		}
+		dst.bh.TimestampsMarshalType = encoding.MarshalTypeDeltaConst
+		dst.timestampsData = encoding.MarshalVarInt64(nil, 60*1000)
+	} else {
+		dst.timestampsData = bytesutil.ResizeNoCopyMayOverallocate(dst.timestampsData, int(br.bh.TimestampsBlockSize))
+		br.p.timestampsFile.MustReadAt(dst.timestampsData, int64(br.bh.TimestampsBlockOffset))
 
-	dst.valuesData = bytesutil.ResizeNoCopyMayOverallocate(dst.valuesData, int(br.bh.ValuesBlockSize))
-	br.p.valuesFile.MustReadAt(dst.valuesData, int64(br.bh.ValuesBlockOffset))
+		dst.valuesData = bytesutil.ResizeNoCopyMayOverallocate(dst.valuesData, int(br.bh.ValuesBlockSize))
+		br.p.valuesFile.MustReadAt(dst.valuesData, int64(br.bh.ValuesBlockOffset))
+	}
 }
 
 // MetricBlockRef contains reference to time series block for a single metric.

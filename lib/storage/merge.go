@@ -18,12 +18,12 @@ import (
 //
 // rowsMerged is atomically updated with the number of merged rows during the merge.
 func mergeBlockStreams(s *Storage, ph *partHeader, bsw *blockStreamWriter, bsrs []*blockStreamReader, stopCh <-chan struct{}, dmis *uint64set.Set, retentionDeadline int64,
-	rowsMerged, rowsDeleted *atomic.Uint64, useSparseCache bool) error {
+	rowsMerged, rowsDeleted *atomic.Uint64, useSparseCache bool, dstPartType partType) error {
 	ph.Reset()
 
 	bsm := bsmPool.Get().(*blockStreamMerger)
 	bsm.Init(bsrs, retentionDeadline, useSparseCache)
-	err := mergeBlockStreamsInternal(s, ph, bsw, bsm, stopCh, dmis, rowsMerged, rowsDeleted)
+	err := mergeBlockStreamsInternal(s, ph, bsw, bsm, stopCh, dmis, rowsMerged, rowsDeleted, dstPartType)
 	bsm.reset()
 	bsmPool.Put(bsm)
 	bsw.MustClose()
@@ -41,7 +41,7 @@ var bsmPool = &sync.Pool{
 
 var errForciblyStopped = fmt.Errorf("forcibly stopped")
 
-func mergeBlockStreamsInternal(s *Storage, ph *partHeader, bsw *blockStreamWriter, bsm *blockStreamMerger, stopCh <-chan struct{}, dmis *uint64set.Set, rowsMerged, rowsDeleted *atomic.Uint64) error {
+func mergeBlockStreamsInternal(s *Storage, ph *partHeader, bsw *blockStreamWriter, bsm *blockStreamMerger, stopCh <-chan struct{}, dmis *uint64set.Set, rowsMerged, rowsDeleted *atomic.Uint64, dstPartType partType) error {
 	pendingBlockIsEmpty := true
 	pendingBlock := getBlock()
 	defer putBlock(pendingBlock)
@@ -113,14 +113,14 @@ func mergeBlockStreamsInternal(s *Storage, ph *partHeader, bsw *blockStreamWrite
 			if available {
 				downSampling(pendingBlock, duration)
 			}
-			bsw.WriteExternalBlock(pendingBlock, ph, &localRowsMerged)
+			bsw.WriteExternalBlock(s, pendingBlock, ph, &localRowsMerged, dstPartType)
 			pendingBlock.CopyFrom(b)
 			continue
 		}
 		if pendingBlock.tooBig() && pendingBlock.bh.MaxTimestamp <= b.bh.MinTimestamp {
 			// Fast path - pendingBlock is too big and it doesn't overlap with b.
 			// Write the pendingBlock and then deal with b.
-			bsw.WriteExternalBlock(pendingBlock, ph, &localRowsMerged)
+			bsw.WriteExternalBlock(s, pendingBlock, ph, &localRowsMerged, dstPartType)
 			pendingBlock.CopyFrom(b)
 			continue
 		}
@@ -160,13 +160,17 @@ func mergeBlockStreamsInternal(s *Storage, ph *partHeader, bsw *blockStreamWrite
 		tmpBlock.timestamps = tmpBlock.timestamps[:maxRowsPerBlock]
 		tmpBlock.values = tmpBlock.values[:maxRowsPerBlock]
 		tmpBlock.fixupTimestamps()
-		bsw.WriteExternalBlock(tmpBlock, ph, &localRowsMerged)
+		bsw.WriteExternalBlock(s, tmpBlock, ph, &localRowsMerged, dstPartType)
 	}
 	if err := bsm.Error(); err != nil {
 		return fmt.Errorf("cannot read block to be merged: %w", err)
 	}
 	if !pendingBlockIsEmpty {
-		bsw.WriteExternalBlock(pendingBlock, ph, &localRowsMerged)
+		bsw.WriteExternalBlock(s, pendingBlock, ph, &localRowsMerged, dstPartType)
+	}
+	err := bsw.Finish()
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -215,6 +219,56 @@ func mergeBlocks(ob, ib1, ib2 *Block, retentionDeadline int64, rowsDeleted *uint
 		}
 		ib1, ib2 = ib2, ib1
 	}
+}
+
+func getShardingKey(b *Block) string {
+	keys := GetObjectStorageShardingKeys()
+	if len(keys) == 0 {
+		return "0000000000000000"
+	}
+	storage := getStorage()
+	metricName := storage.GetMetricNameByMetricId(b.bh.TSID.MetricID)
+	tags := metricName.Tags
+	for _, key := range keys {
+		for _, tag := range tags {
+			if key == string(tag.Key) {
+				return reverseString(string(tag.Value))
+			}
+		}
+	}
+	return "0000000000000000"
+}
+
+func reverseString(s string) string {
+	runes := []rune(s)
+	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+		runes[i], runes[j] = runes[j], runes[i]
+	}
+	return string(runes)
+}
+
+func isObjectStorageAvailable(s *Storage, b *Block) bool {
+	if s == nil {
+		return false
+	}
+	durations := GetObjectStorageFilters()
+	for _, duration := range durations {
+		filters := duration.Tfs
+		if filters != nil {
+			tr := TimeRange{
+				MinTimestamp: b.bh.MinTimestamp,
+				MaxTimestamp: b.bh.MaxTimestamp,
+			}
+			if !s.ContainsMetricId(filters, tr, b.bh.TSID.MetricID) {
+				return false
+			}
+		}
+		period := duration.Period
+		isTimeout := time.Now().UnixMilli()-b.bh.MaxTimestamp > period.Milliseconds()
+		return isTimeout
+	}
+	period := GetObjectStoragePeriod()
+	return time.Now().UnixMilli()-b.bh.MaxTimestamp > period.Milliseconds()
 }
 
 func isDownSamplingAvailable(s *Storage, b *Block) (bool, time.Duration) {
