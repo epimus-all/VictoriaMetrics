@@ -130,6 +130,7 @@ func main() {
 	storage.SetLogNewSeries(*logNewSeries)
 	storage.SetRetentionTimezoneOffset(*retentionTimezoneOffset)
 	storage.SetFreeDiskSpaceLimit(minFreeDiskSpaceBytes.N)
+	storage.SetObjectStoragePeriod(*objectStoragePeriod)
 	storage.SetTSIDCacheSize(cacheSizeStorageTSID.IntN())
 	storage.SetTagFiltersCacheSize(cacheSizeIndexDBTagFilters.IntN())
 	if *finalDedupScheduleInterval < time.Hour {
