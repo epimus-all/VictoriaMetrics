@@ -51,7 +51,7 @@ const pendingRowsFlushInterval = 2 * time.Second
 // The interval for guaranteed flush of recently ingested data from memory to on-disk parts, so they survive process crash.
 var dataFlushInterval = 5 * time.Second
 
-var compactionInterval = 1 * time.Minute
+var compactionInterval = 1 * time.Hour
 
 // SetDataFlushInterval sets the interval for guaranteed flush of recently ingested data from memory to disk.
 //
@@ -1647,7 +1647,7 @@ func (pt *partition) mergePartsInternal(dstPartPath string, bsw *blockStreamWrit
 	retentionDeadline := currentTimestamp - pt.s.retentionMsecs
 	activeMerges.Add(1)
 	dmis := pt.s.getDeletedMetricIDs()
-	err := mergeBlockStreams(pt.s, &ph, bsw, bsrs, stopCh, dmis, retentionDeadline, rowsMerged, rowsDeleted, useSparseCache)
+	err := mergeBlockStreams(pt.s, &ph, bsw, bsrs, stopCh, dmis, retentionDeadline, rowsMerged, rowsDeleted, useSparseCache, dstPartType)
 	activeMerges.Add(-1)
 	mergesCount.Add(1)
 	if err != nil {
@@ -1833,7 +1833,7 @@ func (pt *partition) removeStaleParts() {
 func (pt *partition) getPartsToMerge(pws []*partWrapper, maxOutBytes uint64, sizeFilter bool) []*partWrapper {
 	pwsRemaining := make([]*partWrapper, 0, len(pws))
 	for _, pw := range pws {
-		if !pw.isInMerge {
+		if !pw.isInMerge && !pw.mustDrop.Load() && !pw.p.ph.IsObjectStorage {
 			pwsRemaining = append(pwsRemaining, pw)
 		}
 	}
@@ -1858,14 +1858,16 @@ func isAvailable(pw *partWrapper) bool {
 	rdurations := GetRetentionFilter()
 	ddurations := GetDownSamplingPeriod()
 	duration := append(rdurations, ddurations...)
-	for _, duration := range duration {
+	for _, d := range duration {
 		at := pw.p.indexFile.(*fs.ReaderAt)
-		neverDoIt := at.GetModTime().UnixMilli()-pw.p.ph.MaxTimestamp < duration.Period.Milliseconds()
-		timeOut := time.Now().UnixMilli()-pw.p.ph.MaxTimestamp > duration.Period.Milliseconds()
-		result := neverDoIt && timeOut
-		return result
+		neverDoIt := at.GetModTime().UnixMilli()-pw.p.ph.MaxTimestamp < d.Period.Milliseconds()
+		timeOut := time.Now().UnixMilli()-pw.p.ph.MaxTimestamp > d.Period.Milliseconds()
+		if neverDoIt && timeOut {
+			return true
+		}
 	}
-	return false
+	period := GetObjectStoragePeriod()
+	return time.Now().UnixMilli()-pw.p.ph.MaxTimestamp > period.Milliseconds()
 }
 
 // getPartsForOptimalMerge returns parts from pws for optimal merge, plus the remaining parts.
@@ -1903,7 +1905,12 @@ const minMergeMultiplier = 1.7
 
 // appendPartsToMerge finds optimal parts to merge from src, appends them to dst and returns the result.
 func appendPartsToMerge(dst, src []*partWrapper, maxPartsToMerge int, maxOutBytes uint64, sizeFilter bool) []*partWrapper {
-	if len(src) < 1 {
+	if !sizeFilter {
+		if len(src) == 1 {
+			return src
+		}
+	}
+	if len(src) < 2 {
 		// There is no need in merging zero or one part :)
 		return dst
 	}
@@ -1961,14 +1968,16 @@ func appendPartsToMerge(dst, src []*partWrapper, maxPartsToMerge int, maxOutByte
 		}
 	}
 
-	minM := float64(maxPartsToMerge) / 2
-	if minM < minMergeMultiplier {
-		minM = minMergeMultiplier
-	}
-	if maxM < minM {
-		// There is no sense in merging parts with too small m,
-		// since this leads to high disk write IO.
-		return dst
+	if sizeFilter {
+		minM := float64(maxPartsToMerge) / 2
+		if minM < minMergeMultiplier {
+			minM = minMergeMultiplier
+		}
+		if maxM < minM {
+			// There is no sense in merging parts with too small m,
+			// since this leads to high disk write IO.
+			return dst
+		}
 	}
 	return append(dst, pws...)
 }

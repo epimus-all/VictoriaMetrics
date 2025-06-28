@@ -2,6 +2,7 @@ package storage
 
 import (
 	"path/filepath"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -101,6 +102,11 @@ func (p *part) String() string {
 		return p.path
 	}
 	return p.ph.String()
+}
+
+func (p *part) IndexIdx() string {
+	split := strings.Split(p.path, "/")
+	return split[len(split)-1]
 }
 
 // MustClose closes all the part files.

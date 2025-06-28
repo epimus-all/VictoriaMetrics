@@ -82,8 +82,13 @@ var (
 		"See https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#track-ingested-metrics-usage")
 	cacheSizeMetricNamesStats = flagutil.NewBytes("storage.cacheSizeMetricNamesStats", 0, "Overrides max size for storage/metricNamesStatsTracker cache. "+
 		"See https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#cache-tuning")
-	downSamplingPeriods = flagutil.NewArrayString("downsampling.period", "")
-	retentionFilters    = flagutil.NewArrayString("retentionFilter", "")
+	downSamplingPeriods       = flagutil.NewArrayString("downsampling.period", "")
+	objectStorageFilters      = flagutil.NewArrayString("objectStorageFilter", "")
+	objectStoragePeriod       = flag.Duration("objectStoragePeriod", 30*24*time.Hour, "")
+	retentionFilters          = flagutil.NewArrayString("retentionFilter", "")
+	Region                    = flag.String("oss.region", "", "The oss param")
+	OssBucket                 = flag.String("oss.bucket", "", "The oss bucket")
+	objectStorageShardingKeys = flag.String("objectStorageShardingKeys", "", "objectStorageShardingKeys")
 )
 
 // CheckTimeRange returns true if the given tr is denied for querying.
@@ -105,7 +110,7 @@ func CheckTimeRange(tr storage.TimeRange) error {
 func Init(resetCacheIfNeeded func(mrs []storage.MetricRow)) {
 	downSamplingPeriod := getDownSamplingPeriod()
 	retentionFilterDurations := GetRetentionFilterDurations()
-
+	objectStorageDurations := GetObjectStorageFilters()
 	if err := encoding.CheckPrecisionBits(uint8(*precisionBits)); err != nil {
 		logger.Fatalf("invalid `-precisionBits`: %s", err)
 	}
@@ -118,7 +123,14 @@ func Init(resetCacheIfNeeded func(mrs []storage.MetricRow)) {
 	storage.SetTagFiltersCacheSize(cacheSizeIndexDBTagFilters.IntN())
 	storage.SetMetricNamesStatsCacheSize(cacheSizeMetricNamesStats.IntN())
 	storage.SetDownSamplingPeriod(downSamplingPeriod)
+	storage.SetObjectStorageFilters(objectStorageDurations)
+	storage.SetObjectStoragePeriod(*objectStoragePeriod)
 	storage.SetRetentionFilter(retentionFilterDurations)
+	storage.SetObjectStorageShardingKeys(strings.Split(*objectStorageShardingKeys, ","))
+	storage.InitOss(storage.OssConfig{
+		Region:     *Region,
+		BucketName: *OssBucket,
+	})
 	mergeset.SetIndexBlocksCacheSize(cacheSizeIndexDBIndexBlocks.IntN())
 	mergeset.SetDataBlocksCacheSize(cacheSizeIndexDBDataBlocks.IntN())
 	mergeset.SetDataBlocksSparseCacheSize(cacheSizeIndexDBDataBlocksSparse.IntN())
@@ -156,6 +168,24 @@ func Init(resetCacheIfNeeded func(mrs []storage.MetricRow)) {
 		writeStorageMetrics(w, strg)
 	})
 	metrics.RegisterSet(storageMetrics)
+	storage.SetStorage(*Storage)
+}
+
+func GetObjectStorageFilters() []storage.LabelDuration {
+	lds := make([]storage.LabelDuration, len(*objectStorageFilters))
+	for i, objectStoragePeriod := range *objectStorageFilters {
+		split := strings.Split(objectStoragePeriod, ":")
+		var period time.Duration
+		filter, _ := metricsql.Parse(split[0])
+		labelFilter := filter.(*metricsql.MetricExpr)
+		filters_ := toTagFilters(labelFilter)
+		period, _ = timeutil.ParseDuration(split[1])
+		lds[i] = storage.LabelDuration{
+			Tfs:    filters_,
+			Period: period,
+		}
+	}
+	return lds
 }
 
 func GetRetentionFilterDurations() []storage.LabelDuration {
