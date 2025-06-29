@@ -169,6 +169,8 @@ func main() {
 
 	var m storage.Metrics
 	strg.UpdateMetrics(&m)
+	storage.SetStorage(strg)
+
 	tm := &m.TableMetrics
 	partsCount := tm.SmallPartsCount + tm.BigPartsCount
 	blocksCount := tm.SmallBlocksCount + tm.BigBlocksCount

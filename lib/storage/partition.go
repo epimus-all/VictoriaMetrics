@@ -1867,7 +1867,7 @@ func isAvailable(pw *partWrapper) bool {
 		}
 	}
 	period := GetObjectStoragePeriod()
-	return time.Now().UnixMilli()-pw.p.ph.MaxTimestamp > period.Milliseconds()
+	return time.Now().UnixMilli()-pw.p.ph.MinTimestamp > period.Milliseconds()
 }
 
 // getPartsForOptimalMerge returns parts from pws for optimal merge, plus the remaining parts.

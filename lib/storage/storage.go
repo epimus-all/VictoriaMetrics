@@ -175,13 +175,13 @@ type Storage struct {
 	metricsTracker *metricnamestats.Tracker
 }
 
-var s Storage
+var s *Storage
 
-func SetStorage(storage Storage) {
+func SetStorage(storage *Storage) {
 	s = storage
 }
 
-func getStorage() Storage {
+func getStorage() *Storage {
 	return s
 }
 
