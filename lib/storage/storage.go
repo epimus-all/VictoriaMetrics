@@ -1295,7 +1295,8 @@ func nextRetentionDeadlineSeconds(atSecs, retentionSecs, offsetSecs int64) int64
 }
 
 func (s *Storage) GetMetricNameByMetricId(metricId uint64) MetricName {
-	db, _ := s.getCurrIndexDB()
+	db, putIndexDB := s.getCurrIndexDB()
+	defer putIndexDB()
 	search := db.getIndexSearch(0, 0, noDeadline)
 	var dst []byte
 	dst, _ = search.searchMetricName(dst[:0], metricId)

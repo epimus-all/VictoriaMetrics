@@ -51,7 +51,7 @@ const pendingRowsFlushInterval = 2 * time.Second
 // The interval for guaranteed flush of recently ingested data from memory to on-disk parts, so they survive process crash.
 var dataFlushInterval = 5 * time.Second
 
-var compactionInterval = 1 * time.Hour
+var compactionInterval = 15 * time.Minute
 
 // SetDataFlushInterval sets the interval for guaranteed flush of recently ingested data from memory to disk.
 //
